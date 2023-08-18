@@ -1,15 +1,16 @@
 package com.deadgrandead;
 
-import java.io.BufferedOutputStream;
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -17,6 +18,8 @@ class Server {
     private final List<String> validPaths = List.of("/index.html", "/spring.svg", "/spring.png", "/resources.html",
             "/styles.css", "/app.js", "/links.html", "/forms.html", "/classic.html", "/events.html", "/events.js");
     private final ExecutorService threadPool;
+
+    private final Map<String, ConcurrentHashMap<String, Handler>> handlers = new ConcurrentHashMap<>();
     private final int port;
 
     public Server(int threads, int port) {
@@ -35,6 +38,12 @@ class Server {
         }
     }
 
+    public void addHandler(String method, String path, Handler handler) {
+        handlers
+                .computeIfAbsent(method, k -> new ConcurrentHashMap<>())
+                .put(path, handler);
+    }
+
     private void handleConnection(Socket socket) {
         try (
                 final var in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
@@ -46,22 +55,51 @@ class Server {
                 return;
             }
 
+            final var method = parts[0];
             final var path = parts[1];
-            if (!validPaths.contains(path)) {
-                sendNotFound(out);
-                return;
+
+            // Парсинг заголовков
+            Map<String, String> headers = new HashMap<>();
+            String line;
+            while (!(line = in.readLine()).isEmpty()) {
+                String[] headerParts = line.split(": ");
+                headers.put(headerParts[0], headerParts[1]);
             }
 
-            if (path.equals("/classic.html")) {
-                sendClassicHtml(out);
-                return;
-            }
+            // Здесь начинается тело запроса (если есть)
+            InputStream bodyStream = new InputStream() {
+                @Override
+                public int read() throws IOException {
+                    return in.read();
+                }
+            };
 
-            sendFile(path, out);
+            Request request = new Request(method, path, headers, bodyStream);
+
+            Handler handler = Optional
+                    .ofNullable(handlers.get(method))
+                    .map(h -> h.get(path))
+                    .orElse(null);
+
+            if (handler != null) {
+                handler.handle(request, out);
+            } else {
+                // Тут, если нужно, можно оставить свои старые обработчики:
+                if (!validPaths.contains(path)) {
+                    sendNotFound(out);
+                    return;
+                }
+                if (path.equals("/classic.html")) {
+                    sendClassicHtml(out);
+                    return;
+                }
+                sendFile(path, out);
+            }
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
+
 
     private void sendNotFound(BufferedOutputStream out) throws IOException {
         out.write((
